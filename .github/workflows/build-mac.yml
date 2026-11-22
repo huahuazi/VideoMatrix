@@ -59,8 +59,11 @@ jobs:
           mkdir -p backend/ffmpeg
           tools_dir="$RUNNER_TEMP/videomatrix-media-tools"
           mkdir -p "$tools_dir"
+          # 媒体工具取自上游已发布且校验过的 dmg。fork 不复制 Release 产物,
+          # 因此这里必须指向上游仓库,不能用 $GITHUB_REPOSITORY。
+          MEDIA_REPO="w2968066/VideoMatrix--"
           for attempt in 1 2 3; do
-            if gh release download v2.7.0 --repo "$GITHUB_REPOSITORY" \
+            if gh release download v2.7.0 --repo "$MEDIA_REPO" \
               --pattern VideoMatrix.Setup.2.7.0-mac.dmg --dir "$tools_dir" --clobber; then break; fi
             if [ "$attempt" = 3 ]; then exit 1; fi
             sleep 10
