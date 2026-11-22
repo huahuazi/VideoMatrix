@@ -386,6 +386,41 @@ PowerShell -ExecutionPolicy Bypass -File agent_adapter/install_codex.ps1
 
 详细命令与 MCP 工具见 [`agent_adapter/README.md`](agent_adapter/README.md)。
 
+### 全功能接入层：agent_bridge
+
+`agent_adapter` 覆盖传统混剪（Hook / Body / BGM）的半自动流程。如果需要 Agent 完整驱动**结构混剪工作台**（拆片归类、组合公式、批量导出），使用 [`agent_bridge/`](agent_bridge/README.md)。
+
+| | `agent_adapter` | `agent_bridge` |
+|---|---|---|
+| 工具数 | 6 | **33** |
+| 结构混剪 | ✗ | ✓ 完整 27 个端点 |
+| 依赖 | `mcp[cli]==2.0.0` | **零依赖，纯标准库（Python 3.8+）** |
+| 协议 | MCP | **MCP + HTTP + CLI** |
+| MCP 注册名 | `videomatrix` | `videomatrix-bridge` |
+
+两者注册名不同，可以同时安装。`agent_bridge` 是 `agent_adapter` 的功能超集：保留传统混剪能力，并新增结构混剪的完整控制面。
+
+一键接入（Windows 双击，或命令行）：
+
+```powershell
+# Windows：双击 agent_bridge\install.bat，或
+cd agent_bridge
+python -m vmagent.install claude     # 或 cursor / codex
+
+# 自检
+python -m vmagent.install doctor
+```
+
+不需要 `pip install`，也不需要联网。除 MCP 外还可用 HTTP 接入任意框架：
+
+```powershell
+start-http.bat 8770
+# GET  http://127.0.0.1:8770/openai.json   → 直接喂给 LLM function calling
+# POST http://127.0.0.1:8770/call          → {"name":"vm_discover","arguments":{}}
+```
+
+典型流程：`vm_discover` → `vm_project_list` → `vm_import_sources` → `vm_clip_add` → `vm_plan_create` → `vm_render`。详见 [`agent_bridge/README.md`](agent_bridge/README.md)。
+
 ## 使用前预处理
 
 软件只负责裁剪、拼接、加 BGM、加配音、加字幕、加水印。原素材建议先在剪映或其他剪辑软件里预处理。

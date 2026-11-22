@@ -28,6 +28,9 @@ ffmpeg_error_log.txt
 stdout.txt
 stderr.txt
 
+# agent_bridge 安装备份
+*.vmagent.bak
+
 # OS / IDE
 .DS_Store
 Thumbs.db

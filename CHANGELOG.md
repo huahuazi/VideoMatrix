@@ -1,5 +1,22 @@
 # 更新日志
 
+## agent_bridge 1.0.0 - 2026-11-22
+
+### 新增
+
+- 新增 `agent_bridge/` 全功能 Agent 接入层，与原有 `agent_adapter/` 并存、MCP 注册名不冲突（`videomatrix-bridge`）。
+- 33 个工具覆盖连接探测、结构混剪全流程（项目 / 产品 / 文件夹 / 素材 / 片段 / 公式 / 组合清单 / 导出）与传统混剪任务。
+- 一套工具定义同时暴露为 MCP stdio、HTTP JSON、CLI 三种协议，工具只在一处定义，协议层自动派生。
+- 零第三方依赖，纯标准库实现，仅需 Python 3.8+，无需 `pip install`。
+- 端口四级自动发现：环境变量 → `desktop-runtime.json`（APPDATA / LOCALAPPDATA / 仓库根）→ instance 一致性校验 → 默认 8765。
+- 一键注册到 Claude Desktop / Cursor / Codex，写入前自动备份原配置，支持 `--dry-run` 演练。
+- 78 项一致性自测与 Agent 视角全流程演示，含模拟后端，可离线验证。
+
+### 说明
+
+- 结构混剪相关工具依赖 2.8.4.1 定制版的 `/api/structured` 命名空间；用开源版后端时仅传统混剪工具可用，工具会给出明确提示。
+- 仅验证协议层，未在 Windows 真机验证真实素材渲染链路。
+
 ## v2.5.2 - 2026-10-02
 
 ### 新增
