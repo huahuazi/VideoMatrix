@@ -421,6 +421,23 @@ start-http.bat 8770
 
 典型流程：`vm_discover` → `vm_project_list` → `vm_import_sources` → `vm_clip_add` → `vm_plan_create` → `vm_render`。详见 [`agent_bridge/README.md`](agent_bridge/README.md)。
 
+### 结构混剪后端（还原实现）
+
+上游 v2.8.0 只有 Hook/Body 传统混剪。2.8.4.1 定制版多出的**结构化混剪工作台**（A–G 分类、组合公式、镜头测试）原本只存在于闭源的打包后端里。
+
+本仓库通过字节码逆向把它还原成了开源实现，直接并入 `backend/`：
+
+```
+app/models/structured.py            18 个 Pydantic 模型
+app/api/structured_routes.py        24 条路由
+app/services/structured_service.py  业务核心(项目/素材/片段/组合/导出)
+app/services/structured_ffmpeg.py   ffmpeg 参数模板
+```
+
+所以本仓库构建出的安装包，现在**也具备结构混剪能力**，`agent_bridge` 的 33 个工具全部可用。
+
+还原方法、对齐的业务规则、以及与原始版的差异，见 [`docs/structured-restored.md`](docs/structured-restored.md)。
+
 ## 使用前预处理
 
 软件只负责裁剪、拼接、加 BGM、加配音、加字幕、加水印。原素材建议先在剪映或其他剪辑软件里预处理。

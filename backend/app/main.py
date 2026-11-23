@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .api.routes import router
+from .api.structured_routes import router as structured_router
 
 # 确保工作目录正确，以便找到 ffmpeg
 if getattr(sys, 'frozen', False):
@@ -16,7 +17,7 @@ if getattr(sys, 'frozen', False):
 app = FastAPI(
     title="VideoMatrix API",
     description="VideoMatrix 短视频矩阵自动化混剪后端 API",
-    version="2.8.0"
+    version="2.8.4.1-oss"
 )
 
 app.add_middleware(
@@ -28,6 +29,8 @@ app.add_middleware(
 )
 
 app.include_router(router, prefix="/api")
+# 结构化混剪工作台:24 条路由,还原自 2.8.4.1 定制版
+app.include_router(structured_router, prefix="/api")
 
 
 @app.get("/api/health")

@@ -17,6 +17,20 @@
 - 结构混剪相关工具依赖 2.8.4.1 定制版的 `/api/structured` 命名空间；用开源版后端时仅传统混剪工具可用，工具会给出明确提示。
 - 仅验证协议层，未在 Windows 真机验证真实素材渲染链路。
 
+## structured-backend 1.0.0 - 2026-11-23
+
+### 新增
+
+- 逆向还原 2.8.4.1 定制版的结构化混剪后端,并入开源 backend/,使本仓库构建的安装包也具备结构混剪能力。
+- 新增 app/models/structured.py(18 个 Pydantic 模型)、app/api/structured_routes.py(24 条路由)、app/services/structured_service.py(业务核心)、app/services/structured_ffmpeg.py(ffmpeg 参数模板)。
+- 还原方法: PyInstaller CArchive 解析 → PYZ 提取(模块体为 zlib+marshal)→ Python 3.14 字节码反汇编 → 路由与模型逐项重建。
+- 新增 21 项契约测试 tests/test_structured_restored.py,覆盖片段 ID 规则、0.04 秒下限、approved 门禁、公式 A 开头、500 条上限、导出校验与 JSON 持久化。
+
+### 说明
+
+- 数据契约与业务规则与原始闭源版逐条对齐。
+- 导出 worker 保留完整编排与状态机,ffmpeg 命令构造器已就绪,但尚未真正调用 ffmpeg 执行拼接;逐帧校验、预览渲染、去重变体仍为简化实现。
+- 详细对照见 docs/structured-restored.md。
 ## v2.5.2 - 2026-10-02
 
 ### 新增
