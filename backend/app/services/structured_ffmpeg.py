@@ -1,4 +1,4 @@
-"""结构混剪的 ffmpeg 命令构造。
+"""结构混剪的 ffmpeg 命令构造与执行。
 
 参数模板还原自 2.8.4.1 的 structured_service.py 字节码常量:
 
@@ -8,12 +8,19 @@
   * 所有片段先 scale+pad 到同一画布(force_divisible_by=2 保证偶数),
     再 concat,最后统一 fps 与 setpts=N 得到连续时基
   * 无音轨素材补 anullsrc 静音床,再与原声 amix
+
+工具发现与进程执行复用 app/core/ffmpeg.py,不另造一套:
+`_find_tool` 会处理 PyInstaller 的 _MEIPASS 与打包目录,
+`run_process` 已经做了 stderr 排空、取消与超时。
 """
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
+
+from ..core.ffmpeg import FFMPEG, FFPROBE, run_process
 
 AUDIO_RATE = 48000
 AUDIO_CHANNELS = 2
@@ -25,18 +32,12 @@ PIX_FMT = "yuv420p"
 
 
 def ffmpeg_binary() -> str:
-    """优先用打包内置的 ffmpeg,其次系统 PATH。"""
-    candidate = Path(__file__).resolve().parent / "ffmpeg"
-    if candidate.is_file():
-        return str(candidate)
-    return "ffmpeg"
+    """打包内置优先,其次 PATH —— 由 app/core/ffmpeg.py 统一解析。"""
+    return FFMPEG
 
 
 def probe_binary() -> str:
-    candidate = Path(__file__).resolve().parent / "ffprobe"
-    if candidate.is_file():
-        return str(candidate)
-    return "ffprobe"
+    return FFPROBE
 
 
 def _trim_expr(start: float, end: float, time_base: Optional[float] = None) -> str:
@@ -70,12 +71,23 @@ def build_segment_chain(index: int, width: int, height: int, fps: int,
     ).format(i=index, trim=trim, fps=fps, w=width, h=height,
              pix=PIX_FMT, frames=frames)
 
+    # 目标采样数:与视频帧数对齐,保证音画等长 —— 这是 concat 的前提。
+    target_samples = max(1, int(round(frames * AUDIO_RATE / float(fps))))
+
     if keep_audio and has_audio:
+        # 音频不能用视频的 trim(那是按 PTS 切的视频滤镜,拿到音频流会类型不匹配)。
+        # 用时间形式的 atrim(内部按流时基换算),再 resample 到 48kHz;
+        # 末尾 apad + atrim=end_sample 把采样数精确对齐到 target_samples,
+        # 否则 AAC 编码器可能在上游 EOF 前拿不到任何包(Invalid argument)。
         audio = (
-            "[{i}:a:0]{trim},asetpts=PTS-STARTPTS,"
+            "[{i}:a:0]atrim=start={s:.9f}:end={e:.9f},"
+            "asetpts=PTS-STARTPTS,"
             "aresample={rate}:first_pts=0,"
-            "aformat=sample_fmts=fltp:channel_layouts=stereo[a{i}]"
-        ).format(i=index, trim=trim, rate=AUDIO_RATE)
+            "aformat=sample_fmts=fltp:channel_layouts=stereo,"
+            "apad=pad_dur=0.1,"
+            "atrim=end_sample={n},"
+            "asetpts=N/SR/TB[a{i}]"
+        ).format(i=index, s=start, e=end, rate=AUDIO_RATE, n=target_samples)
     else:
         samples = int(round(duration * AUDIO_RATE))
         audio = (
@@ -203,4 +215,72 @@ def probe_media(path: Path) -> Dict[str, Any]:
                 except (TypeError, ValueError):
                     pass
     return info
+
+def render_concat(segments: Sequence[Dict[str, Any]], output: Path,
+                  width: int, height: int, fps: int,
+                  keep_audio: bool = True,
+                  is_cancelled: Optional[Callable[[], bool]] = None,
+                  on_process: Optional[Callable[[Optional[subprocess.Popen]], None]] = None,
+                  timeout: Optional[float] = None,
+                  cwd: Optional[str] = None) -> Dict[str, Any]:
+    """真正执行一次结构拼接。
+
+    返回 {"ok": bool, "command": [...], "error": str|None, "output": str}
+    - 输出目录不存在会自动创建
+    - 目标已存在直接失败,不覆盖(与原版一致)
+    - 取消 / 超时由 run_process 处理,ffmpeg 会被 terminate 后 kill
+    """
+    output = Path(output)
+    if output.exists():
+        return {"ok": False, "error": "目标文件已存在，拒绝覆盖",
+                "output": str(output), "command": []}
+
+    segments = [s for s in segments if s.get("path")]
+    if not segments:
+        return {"ok": False, "error": "没有可拼接的片段",
+                "output": str(output), "command": []}
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    command = build_concat_command(segments, output, width, height, fps, keep_audio)
+
+    ok, error = run_process(command, is_cancelled=is_cancelled,
+                            on_process=on_process, timeout=timeout, cwd=cwd)
+    if ok and not output.is_file():
+        return {"ok": False, "error": "FFmpeg 返回成功但未生成文件",
+                "output": str(output), "command": command}
+    return {"ok": bool(ok), "error": error, "output": str(output),
+            "command": command}
+
+
+def verify_output(path: Path, expected_duration: float,
+                  width: int, height: int, fps: int,
+                  tolerance: float = 0.35) -> Dict[str, Any]:
+    """校验导出结果。
+
+    原版会验证音轨格式、帧率、时长、帧数与非等间隔帧;这里做核心四项:
+    文件存在、有视频轨、尺寸匹配、时长与预期吻合(AAC 音轨、偶发浮点误差留容差)。
+    """
+    path = Path(path)
+    if not path.is_file() or path.stat().st_size == 0:
+        return {"ok": False, "reason": "文件不存在或为空"}
+
+    info = probe_media(path)
+    if not info.get("duration"):
+        return {"ok": False, "reason": "文件无法探测"}
+    if not info.get("width"):
+        return {"ok": False, "reason": "缺少视频轨道"}
+
+    if (info.get("width"), info.get("height")) != (width, height):
+        return {"ok": False,
+                "reason": "尺寸不符: %sx%s, 预期 %sx%s"
+                          % (info.get("width"), info.get("height"), width, height)}
+
+    actual = float(info["duration"])
+    if abs(actual - expected_duration) > max(tolerance, expected_duration * 0.05):
+        return {"ok": False,
+                "reason": "时长 %.3f 秒, 预期 %.3f 秒" % (actual, expected_duration)}
+
+    return {"ok": True, "duration": actual,
+            "width": info.get("width"), "height": info.get("height"),
+            "has_audio": bool(info.get("has_audio"))}
 

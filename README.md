@@ -434,7 +434,7 @@ app/services/structured_service.py  业务核心(项目/素材/片段/组合/导
 app/services/structured_ffmpeg.py   ffmpeg 参数模板
 ```
 
-所以本仓库构建出的安装包，现在**也具备结构混剪能力**，`agent_bridge` 的 33 个工具全部可用。
+所以本仓库构建出的安装包，现在**也具备结构混剪能力**，且导出会真实产出 mp4，`agent_bridge` 的 33 个工具全部可用。
 
 还原方法、对齐的业务规则、以及与原始版的差异，见 [`docs/structured-restored.md`](docs/structured-restored.md)。
 

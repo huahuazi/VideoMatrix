@@ -1,5 +1,22 @@
 # 更新日志
 
+## structured-render 1.0.0 - 2026-11-25
+
+### 新增
+
+- 结构混剪导出链路打通:`_render_worker` 真实调用 FFmpeg 拼接,逐条产出 mp4。
+- structured_ffmpeg 新增 render_concat() 与 verify_output();工具发现与进程执行复用 app/core/ffmpeg.py。
+- 新增 _media_info():用 ffprobe 读素材真实时长/音轨/时间基并缓存;add_clip/update_clip 超出素材时长直接拒绝。
+- 新增 6 项真实渲染测试 tests/test_structured_render.py(单条产出、静音补齐、批量、拒绝覆盖、取消、命名)。
+
+### 修复
+
+- 音频误用视频 trim 导致 Media type mismatch:改为 atrim + aresample + apad/end_sample 对齐到与视频等长。
+- 采样数不足导致 AAC 报 Could not open encoder before EOF:用目标采样数精确裁剪解决。
+- has_audio 默认 True 导致无音轨素材被误判:统一走 _media_info 缓存。
+- 取消/校验失败时残留半成品文件:现在会删除。
+- 已完成任务被 stop_render 改成 stopping 卡死:增加终态保护。
+
 ## agent_bridge 1.0.0 - 2026-11-22
 
 ### 新增

@@ -129,18 +129,46 @@ python -m unittest tests.test_structured_restored -v
 | 导出校验 | 帧数/时长/音轨深度校验 | **简化**：只做目标文件存在检查 |
 | 渲染 worker | 完整 FFmpeg 调度 + 进度流 | **简化**：编排与状态机完整，实际拼接调用 `structured_ffmpeg` |
 | 兼容预览 | 精确连续回放 | **未实现** |
+| 导出校验 | 帧数/时长/音轨深度校验 | **部分**：校验文件存在、尺寸、时长；未做逐帧与音轨参数校验 |
+| 渲染 worker | 完整 FFmpeg 调度 + 进度流 | **已实现**：真实调用 FFmpeg 拼接，逐条独立执行 |
+| 兼容预览 | 精确连续回放 | **未实现** |
 | 画面去重变体 | `structured_variant` | **未实现** |
 
-**结论**：数据契约与业务规则已完整对齐；导出链路保留了编排骨架和参数模板，
-但逐帧校验、预览渲染、去重变体这三块仍是简化实现。
+**结论**：数据契约与业务规则已完整对齐；导出链路已打通，能真实产出 mp4；
+逐帧深度校验、预览渲染、去重变体三块仍是简化实现。
+
+---
+
+## 导出实现
+
+`_render_worker` 逐条调用 `structured_ffmpeg.render_concat`，真实产出 mp4：
+
+- 工具发现复用 `app/core/ffmpeg.py` 的 `_find_tool`（自动处理 PyInstaller `_MEIPASS`）
+- 进程执行复用 `run_process`（已做 stderr 排空、取消 terminate/kill、超时）
+- 每条成片独立一次 FFmpeg 调用，单条失败不中断整批
+- 导出后 `verify_output` 校验尺寸与时长，不合格则删除产物并计失败
+- 取消时删除半成品文件，不残留无法播放的空壳
+- 素材时长在 `add_clip` / `update_clip` 时用 ffprobe 校验，超出范围直接拒绝
+
+### 音频链路的关键点
+
+音频不能用视频的 `trim`（那是按 PTS 切的视频滤镜，接到音频流会报
+`Media type mismatch`）。正确做法：
+
+1. `atrim=start=…:end=…` 按时间裁
+2. `aresample=48000` 统一采样率
+3. `apad` + `atrim=end_sample=<帧数×48000/fps>` 把采样数精确对齐到与视频等长
+
+第 3 步不能省：采样数不足时 AAC 编码器可能在上游 EOF 前拿不到任何包，
+报 `Could not open encoder before EOF`，整条成片失败。
 
 ---
 
 ## 已知限制
 
-1. 导出 worker 目前只完成编排与状态机，**没有真正调用 ffmpeg 执行拼接**。
-   命令构造器已就绪（`structured_ffmpeg.build_concat_command`），接入即可用。
-2. 未做逐帧校验（原版会验 AAC 音轨、帧率、时长、非等间隔帧）。
-3. 预览（`/previews`）返回 404 —— 该端点未实现。
-4. 去重变体（`variant_config`）接收但未应用。
-5. 仅在 macOS + Python 3.9 验证；原始目标是 Windows + Python 3.14。
+1. 逐帧深度校验未做（原版会验 AAC 音轨参数、帧率、帧数、非等间隔帧）；
+   这里只校验文件存在、尺寸匹配、时长吻合。
+2. 预览（`/previews`）返回 404 —— 该端点未实现。
+3. 去重变体（`variant_config`）接收但未应用。
+4. 在 macOS + Python 3.9 + FFmpeg 8.1.2 验证，打包 dmg 内的 ARM64 二进制实测通过。
+5. Windows 打包产物未做真实渲染实测（无 Windows 环境），但代码路径相同。

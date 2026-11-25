@@ -26,8 +26,10 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
+
+from . import structured_ffmpeg as sff
+from pathlib import Path
 
 _ID = re.compile(r"^[a-f0-9]{32}$")
 _CLIP_ID = re.compile(r"^[A-GT][1-9][0-9]*$")
@@ -511,6 +513,32 @@ class StructuredService:
                 return source
         raise StructuredNotFound("素材不存在")
 
+    def _media_info(self, source: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """读素材的真实时长/音轨/时间基,结果缓存在项目 JSON 里。
+
+        首次访问会跑 ffprobe 并回写项目,后续直接命中缓存。
+        """
+        if not source:
+            return {}
+        path = Path(str(source.get("path") or ""))
+        if not path.is_file():
+            return {}
+        cached = source.get("media_info") or {}
+        if cached.get("duration") and cached.get("path_mtime") == path.stat().st_mtime:
+            return cached
+
+        info = sff.probe_media(path)
+        if not info.get("duration"):
+            return {}
+        info["path_mtime"] = path.stat().st_mtime
+        source["media_info"] = info
+        # 顺手补回 duration 字段,前端列表能直接显示
+        if not source.get("duration"):
+            source["duration"] = info["duration"]
+        return info
+
+
+
     # ---------------- 片段 ----------------
 
     def add_clip(self, pid: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -525,6 +553,9 @@ class StructuredService:
         with self._lock:
             project = self._load(pid)
             source = self._source(project, source_id)
+            media = self._media_info(source)
+            if media.get("duration"):
+                validate_range(start, end, float(media["duration"]))
             if not source.get("product_id"):
                 raise ValueError(
                     "素材 " + source.get("name", "") + " 尚未归属产品，请先明确原片归属"
@@ -576,7 +607,9 @@ class StructuredService:
                 raise StructuredNotFound("片段不存在")
             start = float(changes["start"]) if changes.get("start") is not None else clip["start"]
             end = float(changes["end"]) if changes.get("end") is not None else clip["end"]
-            validate_range(start, end)
+            source = next((s for s in project["sources"] if s["id"] == clip.get("source_id")), None)
+            media = self._media_info(source) if source else {}
+            validate_range(start, end, float(media["duration"]) if media.get("duration") else None)
             clip["start"] = round(start, 6)
             clip["end"] = round(end, 6)
             clip["duration"] = round(end - start, 6)
@@ -756,6 +789,8 @@ class StructuredService:
         job = self._jobs.get(render_id)
         if job is None:
             raise StructuredNotFound("导出任务不存在")
+        if job.get("status") in ("completed", "failed", "stopped"):
+            return {"stopped": render_id, "already_finished": True}
         job["status"] = "stopping"
         process = self._processes.get(render_id)
         if process and process.poll() is None:
@@ -774,15 +809,25 @@ class StructuredService:
         return {"stopped": count}
 
     def _render_worker(self, render_id: str, job: Dict[str, Any]) -> None:
-        """导出调度。单条失败不中断整批,结束时汇总。
+        """导出调度:逐条拼接 → 校验 → 汇总。
 
-        注意:这里只做编排与状态维护。真实拼接依赖 ffmpeg,
-        命令模板见 restored/structured_ffmpeg.py 的 build_concat_command()。
+        每条成片一次 FFmpeg 调用,单条失败不中断整批。
+        取消通过 is_cancelled 回调传给 run_process,会 terminate/kill 子进程。
         """
         live = self._jobs.get(render_id)
         if live is None:
             return
         live["status"] = "running"
+
+        def cancelled() -> bool:
+            return live.get("status") in ("stopping", "stopped")
+
+        def bind(process):
+            if process is None:
+                self._processes.pop(render_id, None)
+            else:
+                self._processes[render_id] = process
+
         try:
             project = self._load(job["project_id"])
             plan = next((p for p in project["plans"] if p["id"] == job["plan_id"]), None)
@@ -790,52 +835,108 @@ class StructuredService:
                 live["status"] = "failed"
                 live["messages"].append("计划不存在")
                 return
+
             index = {c["id"]: c for c in project["clips"]}
             sources = {s["id"]: s for s in project["sources"]}
+            width, height, fps = job["width"], job["height"], job["fps"]
+            keep_audio = bool(job.get("keep_audio", True))
 
             output_dir = Path(job["output_dir"])
             output_dir.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%m%d")
 
             for position, combo in enumerate(plan["combinations"]):
-                if live.get("status") in ("stopping", "stopped"):
+                if cancelled():
                     break
-                segments = []
+
+                segments: List[Dict[str, Any]] = []
+                expected = 0.0
+                missing = []
                 for clip_id in combo:
                     clip = index.get(clip_id)
                     if clip is None:
+                        missing.append(clip_id)
                         continue
                     source = sources.get(clip.get("source_id"))
                     if source is None:
+                        missing.append(clip_id)
                         continue
-                    segments.append({"path": source["path"],
-                                     "start": clip["start"], "end": clip["end"],
-                                     "clip_id": clip_id})
-                live["messages"].append("正在导出 " + str(position + 1) + "/" + str(live["total"]))
-                if not segments:
+                    info = self._media_info(source)
+                    segments.append({
+                        "path": source["path"],
+                        "start": float(clip["start"]),
+                        "end": float(clip["end"]),
+                        "has_audio": bool(info.get("has_audio", False)),
+                        "time_base": info.get("time_base"),
+                    })
+                    expected += max(0.0, float(clip["end"]) - float(clip["start"]))
+
+                live["messages"].append(
+                    "正在导出 %d/%d" % (position + 1, live["total"]))
+
+                if missing:
                     live["failed"] += 1
+                    live["messages"].append(
+                        "第 %d 条：片段已失效 %s" % (position + 1, ", ".join(missing)))
+                    live["done"] = position + 1
                     continue
-                target = output_dir / ("混剪-" + time.strftime("%m%d") + "-" +
-                                       str(position + 1) + ".mp4")
+
+                target = output_dir / ("混剪-%s-%d.mp4" % (stamp, position + 1))
                 if target.exists():
                     live["failed"] += 1
-                    live["messages"].append("目标文件已存在，拒绝覆盖")
+                    live["messages"].append("第 %d 条：目标文件已存在，拒绝覆盖" % (position + 1))
+                    live["done"] = position + 1
                     continue
+
+                result = sff.render_concat(
+                    segments, target, width, height, fps,
+                    keep_audio=keep_audio,
+                    is_cancelled=cancelled,
+                    on_process=bind,
+                    timeout=7200,
+                )
+
+                if cancelled():
+                    # FFmpeg 被 terminate 后会留下半截文件,不能算成片
+                    target.unlink(missing_ok=True)
+                    live["messages"].append("第 %d 条已取消，未完成文件已删除" % (position + 1))
+                    break
+
+                if not result["ok"]:
+                    live["failed"] += 1
+                    live["messages"].append(
+                        "第 %d 条：%s" % (position + 1, result.get("error") or "FFmpeg 执行失败"))
+                    live["done"] = position + 1
+                    continue
+
+                check = sff.verify_output(target, expected, width, height, fps)
+                if not check["ok"]:
+                    live["failed"] += 1
+                    target.unlink(missing_ok=True)
+                    live["messages"].append(
+                        "第 %d 条：导出校验失败 —— %s" % (position + 1, check["reason"]))
+                    live["done"] = position + 1
+                    continue
+
                 live["succeeded"] += 1
                 live["done"] = position + 1
+                live["messages"].append(
+                    "第 %d 条完成：%s（%.2f 秒）" % (position + 1, target.name, check["duration"]))
 
-            if live.get("status") == "stopping":
+            if cancelled():
                 live["status"] = "stopped"
-                live["messages"].append("已停止，保留 " + str(live["succeeded"]) + " 条成片")
+                live["messages"].append(
+                    "已停止，保留 %d 条成片" % live["succeeded"])
             else:
                 live["status"] = "completed"
                 live["messages"].append(
-                    "导出结束：成功 " + str(live["succeeded"]) +
-                    " 条，失败 " + str(live["failed"]) + " 条")
-        except Exception as exc:                      # 导出失败必须留痕
+                    "导出结束：成功 %d 条，失败 %d 条" % (live["succeeded"], live["failed"]))
+        except Exception as exc:
             live["status"] = "failed"
-            live["messages"].append("导出中断，请查看错误: " + str(exc))
+            live["messages"].append("导出中断，请查看错误: %s" % exc)
         finally:
             self._processes.pop(render_id, None)
+
 
 
 _SERVICE: Optional[StructuredService] = None
